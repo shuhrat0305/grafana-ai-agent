@@ -1,0 +1,10 @@
+# Local overrides.
+.env
+.vscode/
+
+# Python bytecode (e.g. from running the agent).
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store

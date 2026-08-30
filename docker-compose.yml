@@ -1,0 +1,142 @@
+# Full local solution, one stack:
+#
+#   browser ─► nginx (proxy) ─► Grafana        (chat overlay injected into the HTML)
+#              nginx /agent/api/* ─► agent backend ─► OpenRouter (LLM)
+#                                        └─► grafana-mcp ─► Grafana ─► Prometheus
+#   metrics-generator ─► Prometheus
+#
+#   docker compose up -d            # everything
+#   open http://127.0.0.1:3200      # Grafana with the chat pill, served by nginx
+#
+# The namespace trick: `proxy` (nginx) owns the network namespace and is the ONLY
+# service that publishes ports. Every other service — Grafana included — joins it
+# with `network_mode: service:proxy` and reaches the rest on 127.0.0.1, the way
+# containers in a pod do. Grafana is never published to the host; the browser
+# always enters through nginx. Add a port on `proxy`, nowhere else.
+name: grafana-agent-demo
+
+services:
+  # The only exposed service. nginx owns the network namespace and publishes every
+  # port; it injects the chat overlay into Grafana's HTML and proxies /agent/api/*
+  # to the agent backend. Config + bundle are static files (nginx/), no render step.
+  proxy:
+    image: nginxinc/nginx-unprivileged:${NGINX_TAG:-1.30.4-alpine}
+    container_name: agent-demo-proxy
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT:-3200}:8080"   # Grafana + injected chat, via nginx (use this)
+      - "${PROM_PORT:-9091}:9090"   # Prometheus UI (shares this netns)
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/overlay.js:/etc/nginx/agent/overlay.js:ro
+
+
+  # The dashboard. Listens on 3000 inside the shared namespace and is reachable
+  # only through nginx — not published to the host.
+  grafana:
+    image: grafana/grafana:${GRAFANA_TAG:-12.1.0}
+    container_name: agent-demo-grafana
+    restart: unless-stopped
+    network_mode: "service:proxy"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_ADMIN_USER: ${GF_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_ADMIN_PASSWORD:-admin}
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_LOG_MODE: console
+    volumes:
+      - ./config/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/local.yaml:ro
+      - ./config/grafana-dashboards.yaml:/etc/grafana/provisioning/dashboards/local.yaml:ro
+      - ./dashboards:/etc/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    depends_on:
+      proxy:
+        condition: service_started
+
+
+  # Grafana MCP server — the agent's tools. Reads Grafana over basic auth; the
+  # datasource + prometheus tools let the agent query the metrics through Grafana.
+  # Read-only posture: the write/admin toolsets are disabled.
+  grafana-mcp:
+    image: grafana/mcp-grafana:${MCP_TAG:-latest}
+    container_name: agent-demo-mcp
+    restart: unless-stopped
+    network_mode: "service:proxy"
+    command:
+      - "--transport=streamable-http"
+      - "--address=0.0.0.0:8000"
+      - "--allowed-hosts=*"
+      - "--disable-admin"
+      - "--disable-alerting"
+      - "--disable-asserts"
+      - "--disable-oncall"
+      - "--disable-sift"
+    environment:
+      GRAFANA_URL: http://127.0.0.1:3000
+      GRAFANA_USERNAME: ${GF_ADMIN_USER:-admin}
+      GRAFANA_PASSWORD: ${GF_ADMIN_PASSWORD:-admin}
+    depends_on:
+      grafana:
+        condition: service_healthy
+
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: agent-demo-prometheus
+    restart: unless-stopped
+    network_mode: "service:proxy"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      grafana:
+        condition: service_healthy
+
+  # Synthetic metrics from little-angry-clouds/prometheus-data-generator. The
+  # series are defined declaratively in config/data-generator.yml; it serves
+  # /metrics/ on 9000 and the dashboard is built on them. Prometheus scrapes it.
+  metrics-generator:
+    image: littleangryclouds/prometheus-data-generator:${PDG_TAG:-latest}
+    container_name: agent-demo-metrics
+    restart: unless-stopped
+    # The upstream image is published for linux/amd64 only; pin it so Docker runs
+    # it under emulation without the platform-mismatch warning on Apple Silicon.
+    platform: linux/amd64
+    network_mode: "service:proxy"
+    environment:
+      PDG_CONFIG: /config.yml
+    volumes:
+      - ./config/data-generator.yml:/config.yml:ro
+    depends_on:
+      proxy:
+        condition: service_started
+
+
+  # The agent backend: serves the chat over HTTP (SSE), runs the agent with
+  # OpenRouter for the LLM and the Grafana MCP server for tools.
+  agent:
+    build:
+      context: .
+      dockerfile: agent/Dockerfile
+    image: agent-demo-agent
+    container_name: agent-demo-backend
+    restart: unless-stopped
+    network_mode: "service:proxy"
+    environment:
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-nvidia/nemotron-3-ultra-550b-a55b:free}
+      MCP_URL: http://127.0.0.1:8000/mcp
+    depends_on:
+      grafana:
+        condition: service_healthy
+
+volumes:
+  grafana-data:
+  prometheus-data:

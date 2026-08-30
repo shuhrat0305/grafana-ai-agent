@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Local metrics + agent demo — stack architecture",
+    "quality_profile": "showcase",
+    "views": [
+      { "id": "chat-path", "label": "Chat request path", "focus": ["browser", "proxy", "agent", "openrouter", "grafana-mcp"], "note": "The overlay calls the agent backend through nginx; the agent backend reaches the LLM and its tools." },
+      { "id": "metrics-path", "label": "Metrics path", "focus": ["metrics-generator", "prometheus", "grafana", "proxy", "browser"], "note": "Prometheus scrapes the generator; Grafana reads Prometheus and is served through nginx." },
+      { "id": "namespace", "label": "Shared network namespace", "focus": ["proxy", "grafana", "agent", "grafana-mcp", "prometheus", "metrics-generator"], "note": "Every service joins nginx's namespace and talks over 127.0.0.1, the way containers in a pod do." }
+    ]
+  },
+  "components": [
+    { "id": "openrouter", "type": "external", "label": "OpenRouter", "sublabel": "the LLM", "pos": [40, 140], "size": [150, 62], "tag": "any model" },
+    { "id": "browser", "type": "external", "label": "Browser", "sublabel": "Grafana + chat overlay", "pos": [40, 380], "size": [150, 62] },
+    { "id": "agent", "type": "backend", "label": "agent backend", "sublabel": "FastAPI SSE :8085", "pos": [380, 140], "size": [150, 62] },
+    { "id": "proxy", "type": "backend", "label": "nginx (proxy)", "sublabel": "the only exposed service", "pos": [380, 380], "size": [150, 62], "tag": ":3200 → :8080" },
+    { "id": "grafana-mcp", "type": "backend", "label": "grafana-mcp", "sublabel": "agent tools :8000", "pos": [720, 140], "size": [150, 62], "tag": "read-only" },
+    { "id": "grafana", "type": "backend", "label": "Grafana", "sublabel": "dashboard :3000", "pos": [720, 380], "size": [150, 62] },
+    { "id": "prometheus", "type": "database", "label": "Prometheus", "sublabel": "TSDB :9090", "pos": [1060, 380], "size": [150, 62] },
+    { "id": "metrics-generator", "type": "backend", "label": "metrics-generator", "sublabel": "prometheus-data-generator :9000", "pos": [1040, 560], "size": [190, 62] }
+  ],
+  "boundaries": [
+    { "kind": "security-group", "label": "shared network namespace — network_mode: service:proxy", "wraps": ["agent", "proxy", "grafana-mcp", "grafana", "prometheus", "metrics-generator"], "pad": 24 }
+  ],
+  "connections": [
+    { "id": "browser-proxy", "from": "browser", "to": "proxy", "label": "HTTP :3200", "variant": "emphasis", "fromSide": "right", "toSide": "left" },
+    { "id": "agent-openrouter", "from": "agent", "to": "openrouter", "label": "LLM via base_url", "variant": "dashed", "fromSide": "left", "toSide": "right" },
+    { "id": "proxy-grafana", "from": "proxy", "to": "grafana", "label": "serves / + overlay", "fromSide": "right", "toSide": "left" },
+    { "id": "grafana-prometheus", "from": "grafana", "to": "prometheus", "label": "datasource queries", "fromSide": "right", "toSide": "left" },
+    { "id": "prometheus-scrape", "from": "prometheus", "to": "metrics-generator", "label": "scrapes /metrics/", "fromSide": "bottom", "toSide": "top", "labelAt": [1135, 501] },
+    { "id": "proxy-agent", "from": "proxy", "to": "agent", "label": "/agent/api/* (SSE)", "fromSide": "top", "toSide": "bottom" },
+    { "id": "agent-mcp", "from": "agent", "to": "grafana-mcp", "label": "MCP tools", "fromSide": "right", "toSide": "left" },
+    { "id": "mcp-grafana", "from": "grafana-mcp", "to": "grafana", "label": "PromQL via Grafana", "fromSide": "bottom", "toSide": "top", "labelAt": [795, 300] }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Edge", "items": ["nginx is the only published service (:3200)", "Grafana and the rest are reachable only through it"] },
+    { "dot": "emerald", "title": "Chat path", "items": ["overlay → /agent/api/* → agent backend (SSE)", "agent backend calls OpenRouter (LLM) and grafana-mcp (tools)"] },
+    { "dot": "amber", "title": "Metrics", "items": ["prometheus-data-generator emits synthetic series", "Prometheus scrapes it; Grafana reads Prometheus"] }
+  ]
+}

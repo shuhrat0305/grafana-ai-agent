@@ -1,0 +1,18 @@
+# Provisioned datasource for the local stack.
+#
+# name and uid are the same string on purpose: a dashboard's DS template variable
+# is a display NAME, while Grafana's API and MCP tools address datasources by uid.
+# Keeping them identical removes that ambiguity locally.
+apiVersion: 1
+
+datasources:
+  - name: local-prom
+    uid: local-prom
+    type: prometheus
+    access: proxy
+    url: http://127.0.0.1:9090
+    isDefault: true
+    editable: true
+    jsonData:
+      httpMethod: POST
+      timeInterval: 15s
